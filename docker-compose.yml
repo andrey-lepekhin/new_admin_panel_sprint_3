@@ -1,0 +1,52 @@
+version: "3.9"
+
+services:
+  django:
+    build: ./app/
+    volumes:
+      - .:/app
+      - uwsgi_data:/tmp/uwsgi/
+      - web_static:/app/static/
+    depends_on:
+      - pg_db
+  pg_db:
+    image: postgres:13
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    env_file: app/.env
+    restart: unless-stopped
+  nginx:
+    build: ./nginx/
+    restart: unless-stopped
+    volumes:
+      - uwsgi_data:/tmp/uwsgi/
+      - web_static:/var/www/app/assets/:ro
+    ports:
+      - "8000:80"
+    depends_on:
+      - django
+  es:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.8
+    environment:
+      - "ES_JAVA_OPTS=-Xmx1000m -Xms1000m"
+      - discovery.type=single-node
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    ports: ['9200:9200']
+  etl:
+    build: ./postgres_to_es/
+    restart: unless-stopped
+    volumes:
+      - etl_state:/etl_state/
+    depends_on:
+      - pg_db
+      - es
+
+volumes:
+  postgres_data:
+  uwsgi_data:
+  web_static:
+  esdata:
+  etl_state:
