@@ -11,8 +11,6 @@ services:
       - pg_db
   pg_db:
     image: postgres:13
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data/
     env_file: app/.env
@@ -34,7 +32,7 @@ services:
       - discovery.type=single-node
     volumes:
       - esdata:/usr/share/elasticsearch/data
-    ports: ['9200:9200']
+    ports: ['9200:9200'] # For reviewer's testing
   etl:
     build: ./postgres_to_es/
     restart: unless-stopped

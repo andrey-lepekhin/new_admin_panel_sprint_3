@@ -14,6 +14,7 @@ from elasticsearch.helpers import streaming_bulk
 from es import ES_INDEX_NAME, es_create_index, generate_actions
 from psycopg2.extras import RealDictCursor
 from run_once import get_lock
+from psycopg2.extensions import connection
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -21,7 +22,7 @@ logger.addHandler(logging.StreamHandler())
 
 
 @backoff()
-def main(pg_connection_credentials: dict, es_client: Elasticsearch, sqlite_db_path: str, frequency=60):
+def main(pg_connection: psycopg2.extensions.connection, es_client: Elasticsearch, sqlite_db_path: str, frequency=60):
     """
     Main ETL function. Extracts movie data from PG, transforms it and pushes to ES index.
 
@@ -49,11 +50,7 @@ def main(pg_connection_credentials: dict, es_client: Elasticsearch, sqlite_db_pa
     etl_successful = False
     save_lsl_to_sqlite(start_time, etl_successful, sqlite_db_path)
 
-    logger.info('Creating ES index if not already present.')
-    es_create_index(es_client)
-
     logger.info('Reading data from PG.')
-    pg_connection = psycopg2.connect(**pg_connection_credentials, cursor_factory=RealDictCursor)
     with pg_connection:
         # Check that DB is not empty
         pg_cursor = pg_connection.cursor()
@@ -68,6 +65,9 @@ def main(pg_connection_credentials: dict, es_client: Elasticsearch, sqlite_db_pa
             pg_cursor = pg_connection.cursor(name='ETL_cursor')
             # The number of rows that the client will pull down at a time from the server side cursor.
             pg_cursor.itersize = 100
+
+            logger.info('Creating ES index if not already present.')
+            es_create_index(es_client)
 
             # Updating ES index
             logger.info('Updating ES index...')
@@ -87,13 +87,32 @@ def main(pg_connection_credentials: dict, es_client: Elasticsearch, sqlite_db_pa
                 i += 1
             etl_successful = True
 
-    pg_connection.close()  # `with` doesn't close the PG connection, we have to do it manually
+
 
     if etl_successful:
         logger.info('Done updating ES index. Updated {0} entries'.format(i))
         logger.info('==========================================')
     save_lsl_to_sqlite(start_time, etl_successful, sqlite_db_path)
 
+@backoff()
+def etl_cycle():
+    """
+    Launches ETL cycle and manages PG and ES connections.
+    """
+    es_client = Elasticsearch(hosts=os.environ.get('ES_HOST', 'http://127.0.0.1:9200'))
+    pg_connection = psycopg2.connect(**PG_CONNECTION_CREDENTIALS, cursor_factory=RealDictCursor)
+    try:
+        while True:
+            main(
+                pg_connection=pg_connection,
+                es_client=es_client,
+                sqlite_db_path=os.environ.get('SQLITE_DB_PATH', 'etl_state/db.sqlite'),
+                frequency=os.environ.get('ETL_CYCLE_SEC', 6),
+            )
+    finally:
+        logger.info("Closing PG and ES connections.")
+        es_client.transport.close()
+        pg_connection.close()  # `with` doesn't close the PG connection, we have to do it manually
 
 if __name__ == '__main__':
     # Ensure only one copy is running
@@ -101,10 +120,4 @@ if __name__ == '__main__':
     logger.info("Got the lock. We're the only ETL process running. Launching polling cycle.")
 
     # Start the ETL cycle
-    while True:
-        main(
-            pg_connection_credentials=PG_CONNECTION_CREDENTIALS,
-            es_client=Elasticsearch(hosts=os.environ.get('ES_HOST', 'http://127.0.0.1:9200')),
-            sqlite_db_path=os.environ.get('SQLITE_DB_PATH', 'etl_state/db.sqlite'),
-            frequency=os.environ.get('ETL_CYCLE_SEC', 6),
-        )
+    etl_cycle()
